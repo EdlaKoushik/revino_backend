@@ -11,6 +11,7 @@ import Stripe from 'stripe';
 import interviewSessionSchema from './models/InterviewSession.js';
 // User model
 import User from './models/User.js';
+import bodyParser from 'body-parser';
 
 dotenv.config();
 
@@ -30,6 +31,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
+app.use('/api/stripe/webhook', bodyParser.raw({ type: 'application/json' }));
 
 // MongoDB connection
 mongoose.connect(process.env.MONGODB_URI)
@@ -291,6 +293,77 @@ app.post('/api/stripe/create-checkout-session', async (req, res) => {
     res.json({ url: session.url });
   } catch (err) {
     console.error('Stripe checkout error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+app.post('/api/stripe/webhook', async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('Webhook signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  switch (event.type) {
+    case 'checkout.session.completed': {
+      const session = event.data.object;
+      const clerkUserId = session.metadata?.clerkUserId;
+      if (clerkUserId) {
+        await User.findOneAndUpdate(
+          { clerkUserId },
+          { plan: 'Premium', stripeSubscriptionId: session.subscription },
+          { new: true }
+        );
+      }
+      break;
+    }
+    case 'customer.subscription.deleted':
+    case 'customer.subscription.updated': {
+      const subscription = event.data.object;
+      const customerId = subscription.customer;
+      const user = await User.findOne({ stripeCustomerId: customerId });
+      if (user) {
+        if (subscription.status === 'active' || subscription.status === 'trialing') {
+          user.plan = 'Premium';
+        } else {
+          user.plan = 'Free';
+        }
+        user.stripeSubscriptionId = subscription.id;
+        await user.save();
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  res.json({ received: true });
+});
+
+// Get all invoices for the logged-in user (Premium)
+app.get('/api/stripe/invoices', async (req, res) => {
+  try {
+    const { clerkUserId } = req.query;
+    if (!clerkUserId) return res.status(400).json({ message: 'Missing user id' });
+    const user = await User.findOne({ clerkUserId });
+    if (!user || !user.stripeCustomerId) return res.status(404).json({ message: 'User or Stripe customer not found' });
+    const invoices = await stripe.invoices.list({ customer: user.stripeCustomerId, limit: 20 });
+    res.json({ invoices: invoices.data });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Download invoice PDF by invoice id
+app.get('/api/stripe/invoice/:invoiceId/pdf', async (req, res) => {
+  try {
+    const invoiceId = req.params.invoiceId;
+    const invoice = await stripe.invoices.retrieve(invoiceId);
+    if (!invoice || !invoice.invoice_pdf) return res.status(404).json({ message: 'Invoice not found or not available as PDF' });
+    res.redirect(invoice.invoice_pdf);
+  } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
