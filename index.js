@@ -12,6 +12,10 @@ import interviewSessionSchema from './models/InterviewSession.js';
 // User model
 import User from './models/User.js';
 import bodyParser from 'body-parser';
+import ScheduledMock from './models/ScheduledMock.js';
+import nodemailer from 'nodemailer';
+import nodeCron from 'node-cron';
+import jwt from 'jsonwebtoken';
 
 dotenv.config();
 
@@ -43,6 +47,69 @@ const InterviewSession = mongoose.model('InterviewSession', interviewSessionSche
 
 // Multer setup for audio and video uploads
 const upload = multer({ storage: multer.memoryStorage() });
+
+// --- Premium Middleware ---
+// Middleware to check if user is premium
+export const requirePremium = async (req, res, next) => {
+  try {
+    // Accept JWT or Clerk Auth header
+    let token = req.headers['authorization'];
+    if (token && token.startsWith('Bearer ')) token = token.slice(7);
+    let userId = null;
+    if (token) {
+      try {
+        // Try Clerk JWT
+        const decoded = jwt.decode(token);
+        userId = decoded?.sub || decoded?.id || null;
+      } catch {}
+    }
+    userId = userId || req.user?.id || req.user?._id || req.body.userId || req.query.userId;
+    if (!userId) return res.status(401).json({ message: 'Not authenticated' });
+    const user = await User.findOne({ clerkUserId: userId });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (user.plan !== 'Premium') {
+      return res.status(403).json({ message: 'Premium plan required for this feature.' });
+    }
+    req.user = user;
+    next();
+  } catch (err) {
+    res.status(500).json({ message: 'Premium check failed', error: err.message });
+  }
+};
+
+// --- Example: Protect a premium-only route ---
+// app.get('/api/premium/feature', requirePremium, async (req, res) => {
+//   res.json({ message: 'You have access to premium features!' });
+// });
+
+// --- Admin API: Live Users & Plans ---
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    // TODO: Add admin auth check
+    const users = await User.find({}, 'clerkUserId email plan createdAt updatedAt');
+    res.json({ users });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// --- Admin API: Update User Plan ---
+app.post('/api/admin/user/:clerkUserId/plan', async (req, res) => {
+  try {
+    // TODO: Add admin auth check
+    const { plan } = req.body;
+    if (!['Free', 'Premium'].includes(plan)) return res.status(400).json({ message: 'Invalid plan' });
+    const user = await User.findOneAndUpdate(
+      { clerkUserId: req.params.clerkUserId },
+      { plan },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json({ user });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
 
 // Routes
 app.get('/', (req, res) => {
@@ -180,9 +247,9 @@ app.post('/api/interview/submit', async (req, res) => {
     let feedback;
     if (mode === 'video') {
       feedback = answers.map((ans, idx) =>
-        ans && ans.video
-          ? `Good video answer for Q${idx + 1}. Eye contact and clarity are important!`
-          : `No video answer provided for Q${idx + 1}.`
+        ans && typeof ans === 'string' && ans.trim().length > 0
+          ? `Good answer for Q${idx + 1}. Eye contact and clarity are important!`
+          : `No answer provided for Q${idx + 1}.`
       );
     } else {
       feedback = answers.map((ans, idx) =>
@@ -365,6 +432,136 @@ app.get('/api/stripe/invoice/:invoiceId/pdf', async (req, res) => {
     res.redirect(invoice.invoice_pdf);
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+});
+
+// Delete interview session by id (user only)
+app.delete('/api/interview/:id', async (req, res) => {
+  try {
+    const interview = await InterviewSession.findById(req.params.id);
+    if (!interview) {
+      return res.status(404).json({ message: 'Interview not found' });
+    }
+    // Optionally: check user ownership here
+    await InterviewSession.findByIdAndDelete(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Fetch all unique resumes and job descriptions for a user
+app.get('/api/interview/past-materials', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ message: 'Missing userId' });
+    const sessions = await InterviewSession.find({ userId });
+    // Only return unique, non-empty resumes and job descriptions
+    const resumes = Array.from(new Set(sessions.map(s => s.resumeText).filter(Boolean)));
+    const jobDescs = Array.from(new Set(sessions.map(s => s.jobDescription).filter(Boolean)));
+    res.json({ resumes, jobDescs });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Schedule a new mock interview (with all interview details)
+app.post('/api/schedule-mock', async (req, res) => {
+  try {
+    const { userId, email, scheduledFor, mode, jobRole, industry, experience, resumeText, jobDescription } = req.body;
+    if (!userId || !email || !scheduledFor) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+    const dateObj = new Date(scheduledFor);
+    if (isNaN(dateObj.getTime())) {
+      return res.status(400).json({ message: 'Invalid date for scheduledFor' });
+    }
+    const scheduled = await ScheduledMock.create({
+      userId, email, scheduledFor: dateObj, mode, jobRole, industry, experience, resumeText, jobDescription
+    });
+    // Send immediate confirmation email
+    await sendMockEmail(email, dateObj, 'confirmation');
+    res.status(201).json({ success: true, scheduled });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Get all scheduled mocks for a user
+app.get('/api/schedule-mock', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ message: 'Missing userId' });
+    const mocks = await ScheduledMock.find({ userId }).sort({ scheduledFor: 1 });
+    res.json({ mocks });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Delete scheduled mock by id
+app.delete('/api/schedule-mock/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = await ScheduledMock.findByIdAndDelete(id);
+    if (!deleted) {
+      return res.status(404).json({ message: 'Scheduled mock not found' });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Nodemailer setup (configure with your SMTP credentials)
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.NOTIFY_EMAIL_USER,
+    pass: process.env.NOTIFY_EMAIL_PASS,
+  },
+  tls: {
+    rejectUnauthorized: false, // Allow self-signed certificates for development
+  },
+});
+
+async function sendMockEmail(email, scheduledFor, type) {
+  let subject, text;
+  const timeStr = new Date(scheduledFor).toLocaleString();
+  if (type === 'confirmation') {
+    subject = 'Your Mock Interview is Scheduled';
+    text = `Your mock interview is scheduled for ${timeStr}. You will receive reminders before your session.`;
+  } else {
+    subject = 'Mock Interview Reminder';
+    text = `Reminder: Your mock interview is scheduled for ${timeStr}. Good luck!`;
+  }
+  await transporter.sendMail({
+    from: process.env.NOTIFY_EMAIL_USER,
+    to: email,
+    subject,
+    text,
+  });
+}
+
+// Cron job: check every 2 minutes for upcoming mocks and send reminders
+nodeCron.schedule('*/2 * * * *', async () => {
+  const now = new Date();
+  const all = await ScheduledMock.find({ notified: { $ne: true } });
+  for (const mock of all) {
+    const diff = (new Date(mock.scheduledFor) - now) / 60000; // minutes
+    if (!mock.notified && diff <= 60 && diff > 59) {
+      await sendMockEmail(mock.email, mock.scheduledFor, 'reminder');
+      mock.notified = '1h';
+      await mock.save();
+    } else if (mock.notified === '1h' && diff <= 30 && diff > 29) {
+      await sendMockEmail(mock.email, mock.scheduledFor, 'reminder');
+      mock.notified = '30m';
+      await mock.save();
+    } else if (mock.notified === '30m' && diff <= 5 && diff > 4) {
+      await sendMockEmail(mock.email, mock.scheduledFor, 'reminder');
+      mock.notified = '5m';
+      await mock.save();
+    }
   }
 });
 
