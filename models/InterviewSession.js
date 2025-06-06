@@ -12,11 +12,8 @@ const interviewSessionSchema = new mongoose.Schema({
   feedback: [{ type: String }], // Per-question feedback
   overallFeedback: { type: String }, // Overall feedback
   status: { type: String, enum: ['created', 'in_progress', 'completed'], default: 'created' },
+  userId: { type: String, required: true }, // Store userId for filtering
+  email: { type: String }, // Store user email for reference
 }, { timestamps: true });
 
 export default interviewSessionSchema;
-
-// In the interview creation endpoint, allow 'video' as a valid mode
-// In the frontend, add a 'video' option to the mode selection UI
-// In the interview session page, add a placeholder for video mode (e.g., webcam capture, or a message that it's coming soon)
-// In the feedback logic, add a branch for video mode feedback

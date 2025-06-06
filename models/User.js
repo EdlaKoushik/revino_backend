@@ -10,4 +10,10 @@ const userSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 }, { timestamps: true });
 
+userSchema.post('save', function(doc) {
+  if (doc.isNew) {
+    console.log('User document created in MongoDB:', doc);
+  }
+});
+
 export default mongoose.model('User', userSchema);

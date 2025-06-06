@@ -36,6 +36,8 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use('/api/stripe/webhook', bodyParser.raw({ type: 'application/json' }));
+// Parse Clerk webhook JSON
+app.use('/api/clerk/webhook', express.json());
 
 // MongoDB connection
 mongoose.connect(process.env.MONGODB_URI)
@@ -111,177 +113,32 @@ app.post('/api/admin/user/:clerkUserId/plan', async (req, res) => {
   }
 });
 
+// --- Add user plan endpoint for frontend gating ---
+app.get('/api/user/plan', async (req, res) => {
+  try {
+    const { clerkUserId } = req.query;
+    if (!clerkUserId) return res.status(400).json({ message: 'Missing user id' });
+    const user = await User.findOne({ clerkUserId });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json({ plan: user.plan });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Routes
 app.get('/', (req, res) => {
   res.json({ message: 'AI Interview Prep API is running' });
 });
 
-// ✅ Create interview session
-app.post('/api/interview/create', async (req, res) => {
-  try {
-    console.log('Received interview creation request:', req.body);
-    const { mode, jobRole, industry, experience, resumeText, jobDescription } = req.body;
-    const userId = req.user?.id || req.user?._id || req.body.userId || null;
-    if (!jobRole || !experience) {
-      return res.status(400).json({ message: 'Job role and experience are required' });
-    }
-    // Enforce free tier limit: 3 interviews/month
-    let isPremium = false;
-    if (userId) {
-      const user = await User.findOne({ clerkUserId: userId });
-      isPremium = user && user.plan === 'Premium';
-      const startOfMonth = new Date();
-      startOfMonth.setDate(1);
-      startOfMonth.setHours(0,0,0,0);
-      const interviewCount = await InterviewSession.countDocuments({
-        'userId': userId,
-        createdAt: { $gte: startOfMonth },
-      });
-      if (!isPremium && interviewCount >= 3) {
-        return res.status(403).json({ message: 'Free plan limit reached. Upgrade to Premium for unlimited interviews.' });
-      }
-    }
-    const interview = await InterviewSession.create({
-      mode,
-      jobRole,
-      industry,
-      experience,
-      resumeText,
-      jobDescription,
-      status: 'created',
-      ...(userId && { userId })
-    });
-    res.status(201).json({ success: true, interview });
-  } catch (err) {
-    console.error('Error creating interview:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
+// Register routes
+import interviewRoutes from './routes/interviewRoutes.js';
+import userRoutes from './routes/userRoutes.js';
+import webhookRoutes from './routes/webhookRoutes.js';
 
-// ✅ Generate questions and update session
-app.post('/api/interview/start', async (req, res) => {
-  try {
-    const { interviewId } = req.body;
-
-    const interview = await InterviewSession.findById(interviewId);
-    if (!interview) {
-      return res.status(404).json({ message: 'Interview not found' });
-    }
-
-    const questions = await generateQuestions(
-      interview.jobRole,
-      interview.industry,
-      interview.experience,
-      interview.jobDescription,
-      interview.resumeText
-    );
-
-    interview.questions = questions;
-    interview.status = 'in_progress';
-    await interview.save();
-
-    res.status(200).json({ success: true, questions });
-  } catch (err) {
-    console.error('Error generating questions:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// Get all interview sessions (for dashboard)
-app.get('/api/interview/all', async (req, res) => {
-  try {
-    const interviews = await InterviewSession.find().sort({ createdAt: -1 });
-    res.json({ interviews });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// Get interview session by id
-app.get('/api/interview/:id', async (req, res) => {
-  try {
-    const interview = await InterviewSession.findById(req.params.id);
-    if (!interview) {
-      return res.status(404).json({ message: 'Interview not found' });
-    }
-    res.json({ success: true, interview });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// Video upload endpoint for video mode answers
-app.post('/api/interview/upload-video', upload.single('video'), async (req, res) => {
-  try {
-    const { interviewId, questionIndex } = req.body;
-    if (!req.file) {
-      return res.status(400).json({ message: 'No video file uploaded.' });
-    }
-    const interview = await InterviewSession.findById(interviewId);
-    if (!interview) {
-      return res.status(404).json({ message: 'Interview not found' });
-    }
-    // Store video as base64 in answers array for demo (in production, use cloud/file storage)
-    const videoBase64 = req.file.buffer.toString('base64');
-    if (!interview.answers) interview.answers = [];
-    interview.answers[questionIndex] = { video: videoBase64, mimetype: req.file.mimetype };
-    await interview.save();
-    res.status(200).json({ success: true, message: 'Video uploaded and saved.' });
-  } catch (err) {
-    console.error('Error uploading video:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// Submit interview answers and generate feedback
-app.post('/api/interview/submit', async (req, res) => {
-  try {
-    const { interviewId, answers, mode } = req.body;
-    console.log('Received submit:', { interviewId, answers, mode });
-    const interview = await InterviewSession.findById(interviewId);
-    if (!interview) {
-      return res.status(404).json({ message: 'Interview not found' });
-    }
-    interview.answers = answers;
-    // Generate per-question feedback (dummy for now, replace with AI call)
-    let feedback;
-    if (mode === 'video') {
-      feedback = answers.map((ans, idx) =>
-        ans && typeof ans === 'string' && ans.trim().length > 0
-          ? `Good answer for Q${idx + 1}. Eye contact and clarity are important!`
-          : `No answer provided for Q${idx + 1}.`
-      );
-    } else {
-      feedback = answers.map((ans, idx) =>
-        ans && ans.length > 0
-          ? `Good answer for Q${idx + 1}.`
-          : `No answer provided for Q${idx + 1}.`
-      );
-    }
-    // Generate overall feedback (dummy for now, replace with AI call)
-    let overallFeedback;
-    if (mode === 'video') {
-      overallFeedback = 'Great presence! Work on body language and confidence.';
-    } else if (mode === 'audio') {
-      overallFeedback = 'Great communication skills! Work on clarity and pacing.';
-    } else {
-      overallFeedback = 'Well-structured answers. Try to be more concise.';
-    }
-    interview.feedback = feedback;
-    interview.overallFeedback = overallFeedback;
-    interview.status = 'completed';
-    await interview.save();
-    console.log('Saved interview:', {
-      answers: interview.answers,
-      feedback: interview.feedback,
-      overallFeedback: interview.overallFeedback,
-    });
-    res.status(200).json({ success: true, feedback, overallFeedback });
-  } catch (err) {
-    console.error('Error submitting interview:', err);
-    res.status(500).json({ message: err.message });
-  }
-});
+app.use('/api/interview', interviewRoutes);
+app.use('/api', userRoutes);
+app.use('/api', webhookRoutes);
 
 // Whisper transcription endpoint
 app.post('/api/interview/transcribe', upload.single('audio'), async (req, res) => {
@@ -562,6 +419,33 @@ nodeCron.schedule('*/2 * * * *', async () => {
       mock.notified = '5m';
       await mock.save();
     }
+  }
+});
+
+// Clerk webhook: create user in MongoDB when Clerk user is created
+app.post('/api/clerk/webhook', async (req, res) => {
+  try {
+    const event = req.body;
+    console.log('Clerk webhook received:', JSON.stringify(event)); // Add logging
+    if (event.type === 'user.created') {
+      const { id, email_addresses } = event.data;
+      const email = email_addresses?.[0]?.email_address;
+      if (id && email) {
+        let user = await User.findOne({ clerkUserId: id });
+        if (!user) {
+          await User.create({ clerkUserId: id, email });
+          console.log('User created in MongoDB:', id, email); // Add logging
+        } else {
+          console.log('User already exists in MongoDB:', id);
+        }
+      } else {
+        console.error('Missing id or email in Clerk webhook event:', event);
+      }
+    }
+    res.status(200).json({ received: true });
+  } catch (err) {
+    console.error('Error handling Clerk webhook:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
