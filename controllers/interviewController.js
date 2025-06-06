@@ -152,3 +152,67 @@ export const submitInterview = async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 };
+
+// Export all interview logs as CSV for admin
+export const exportInterviewLogs = async (req, res) => {
+  try {
+    // Only allow admin (add real admin check in production)
+    // Fetch all interviews
+    const interviews = await InterviewSession.find({}).lean();
+    if (!interviews.length) {
+      return res.status(404).json({ message: 'No interview logs found.' });
+    }
+    // Prepare CSV header
+    const header = [
+      'InterviewID', 'UserID', 'Email', 'JobRole', 'Industry', 'Experience', 'Mode', 'Status', 'CreatedAt', 'Questions', 'Answers', 'Feedback', 'OverallFeedback'
+    ];
+    // Prepare CSV rows
+    const rows = interviews.map(i => [
+      i._id,
+      i.userId,
+      i.email || '',
+      i.jobRole || '',
+      i.industry || '',
+      i.experience || '',
+      i.mode || '',
+      i.status || '',
+      i.createdAt ? new Date(i.createdAt).toISOString() : '',
+      (i.questions || []).join(' | '),
+      (i.answers || []).join(' | '),
+      (i.feedback || []).join(' | '),
+      i.overallFeedback || ''
+    ]);
+    // Convert to CSV string
+    const csv = [header, ...rows].map(r => r.map(x => '"' + String(x).replace(/"/g, '""') + '"').join(',')).join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="interview_logs.csv"');
+    res.send(csv);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// Admin: Edit interview session (status, feedback, overallFeedback, etc.)
+export const adminEditInterview = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body; // e.g., { status, feedback, overallFeedback, ... }
+    const interview = await InterviewSession.findByIdAndUpdate(id, updates, { new: true });
+    if (!interview) return res.status(404).json({ message: 'Interview not found' });
+    res.json({ success: true, interview });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// Admin: Delete interview session
+export const adminDeleteInterview = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = await InterviewSession.findByIdAndDelete(id);
+    if (!deleted) return res.status(404).json({ message: 'Interview not found' });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
