@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import interviewSessionSchema from '../models/InterviewSession.js';
 const InterviewSession = mongoose.models.InterviewSession || mongoose.model('InterviewSession', interviewSessionSchema);
-import { generateQuestions } from '../utils/together.js';
+import { generateQuestions, generateIdealAnswers } from '../utils/together.js';
 import User from '../models/User.js';
 
 export const createInterview = async (req, res) => {
@@ -119,35 +119,62 @@ export const submitInterview = async (req, res) => {
       return res.status(404).json({ message: 'Interview not found' });
     }
     interview.answers = answers;
-    // Generate per-question feedback (dummy for now, replace with AI call)
-    let feedback;
-    if (mode === 'video') {
-      feedback = answers.map((ans, idx) =>
-        ans && typeof ans === 'string' && ans.trim().length > 0
-          ? `Good answer for Q${idx + 1}. Eye contact and clarity are important!`
-          : `No answer provided for Q${idx + 1}.`
+    // Score calculation: percentage of non-empty, sufficiently detailed answers
+    const total = interview.questions.length;
+    // Only count answers with at least 30 characters as "answered"
+    const answered = answers.filter(a => a && a.trim().length >= 30).length;
+    // Score is based on answer quality, not just attempted
+    let score = 0;
+    answers.forEach(ans => {
+      if (!ans || ans.trim().length === 0) return;
+      if (ans.trim().length < 10) score += 5; // very brief
+      else if (ans.trim().length < 30) score += 10; // needs more detail
+      else if (ans.trim().length < 60) score += 15; // moderate
+      else if (ans.trim().length < 120) score += 18; // good
+      else score += 20; // perfect
+    });
+    // Normalize to 100 max
+    score = Math.round((score / (total * 20)) * 100);
+    // Cap at 95 to avoid 100% even for perfect answers
+    if (score > 95) score = 95;
+    // Per-question feedback: more nuanced
+    let feedback = answers.map((ans, idx) => {
+      if (!ans || ans.trim().length === 0) return 'Poor: No answer provided.';
+      if (ans.trim().length < 10) return 'Poor: Very brief answer.';
+      if (ans.trim().length < 30) return 'Average: Needs more detail.';
+      if (ans.trim().length < 60) return 'Moderate: Decent, but could be expanded.';
+      if (ans.trim().length < 120) return 'Good: Clear and relevant.';
+      return 'Perfect: Comprehensive and well-structured.';
+    });
+    // Generate ideal answers using AI
+    let idealAnswers = [];
+    try {
+      idealAnswers = await generateIdealAnswers(
+        interview.questions,
+        interview.jobRole,
+        interview.industry,
+        interview.experience,
+        interview.jobDescription,
+        interview.resumeText
       );
-    } else {
-      feedback = answers.map((ans, idx) =>
-        ans && ans.length > 0
-          ? `Good answer for Q${idx + 1}.`
-          : `No answer provided for Q${idx + 1}.`
-      );
+    } catch (e) {
+      idealAnswers = interview.questions.map((q, idx) => `A strong answer for Q${idx + 1} should address the main requirements and demonstrate relevant skills.`);
     }
-    // Generate overall feedback (dummy for now, replace with AI call)
-    let overallFeedback;
-    if (mode === 'video') {
-      overallFeedback = 'Great presence! Work on body language and confidence.';
-    } else if (mode === 'audio') {
-      overallFeedback = 'Great communication skills! Work on clarity and pacing.';
-    } else {
-      overallFeedback = 'Well-structured answers. Try to be more concise.';
-    }
+    // Overall feedback based on score
+    let overallFeedback = '';
+    if (score === 100) overallFeedback = 'Perfect! You answered all questions thoroughly and demonstrated excellent knowledge.';
+    else if (score >= 80) overallFeedback = 'Great job! Most answers were strong, but review a few areas for improvement.';
+    else if (score >= 60) overallFeedback = 'Good effort. Some answers were solid, but try to add more detail and clarity.';
+    else if (score >= 40) overallFeedback = 'Moderate performance. Focus on providing more complete and relevant answers.';
+    else if (score > 0) overallFeedback = 'Needs improvement. Many answers were missing or too brief. Practice expanding your responses.';
+    else overallFeedback = 'No answers provided. Please try to answer the questions next time.';
     interview.feedback = feedback;
+    interview.idealAnswers = idealAnswers;
     interview.overallFeedback = overallFeedback;
     interview.status = 'completed';
+    interview.score = score;
     await interview.save();
-    res.status(200).json({ success: true, feedback, overallFeedback });
+    res.status(200).json({ success: true, feedback, idealAnswers, overallFeedback, score });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -164,7 +191,7 @@ export const exportInterviewLogs = async (req, res) => {
     }
     // Prepare CSV header
     const header = [
-      'InterviewID', 'UserID', 'Email', 'JobRole', 'Industry', 'Experience', 'Mode', 'Status', 'CreatedAt', 'Questions', 'Answers', 'Feedback', 'OverallFeedback'
+      'InterviewID', 'UserID', 'Email', 'JobRole', 'Industry', 'Experience', 'Mode', 'Status', 'CreatedAt', 'Questions', 'Answers', 'Feedback', 'IdealAnswers', 'OverallFeedback'
     ];
     // Prepare CSV rows
     const rows = interviews.map(i => [
@@ -180,6 +207,7 @@ export const exportInterviewLogs = async (req, res) => {
       (i.questions || []).join(' | '),
       (i.answers || []).join(' | '),
       (i.feedback || []).join(' | '),
+      (i.idealAnswers || []).join(' | '),
       i.overallFeedback || ''
     ]);
     // Convert to CSV string

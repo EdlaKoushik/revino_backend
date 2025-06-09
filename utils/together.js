@@ -1,4 +1,3 @@
-
 import axios from 'axios';
 import dotenv from 'dotenv';
 dotenv.config();
@@ -177,4 +176,33 @@ export const generateQuestions = async (jobRole, industry, experience, jobDescri
     console.error('Question generation failed:', error.message);
     throw error;
   }
+};
+
+// Generate ideal answers for a list of questions
+export const generateIdealAnswers = async (questions, jobRole, industry, experience, jobDescription, resumeText) => {
+  if (!process.env.TOGETHER_API_KEY) {
+    throw new Error('Together AI API key not configured');
+  }
+  const processedResume = processResumeText(resumeText || '');
+  const processedJobDesc = processJobDescription(jobDescription || '');
+  let prompt = `For the following interview questions for a ${experience} ${jobRole}`;
+  if (industry) prompt += ` in the ${industry} industry`;
+  prompt += ', provide a model answer for each question.\n';
+  if (processedJobDesc) prompt += `Job Requirements: ${processedJobDesc}\n`;
+  if (processedResume) prompt += `Candidate Background: ${processedResume}\n`;
+  prompt += '\nQuestions:';
+  questions.forEach((q, i) => {
+    prompt += `\n${i + 1}. ${q}`;
+  });
+  prompt += '\n\nFormat: Answer each question in order, separated by line breaks.';
+
+  const text = await generateQuestionsWithTogetherAI(prompt, process.env.TOGETHER_API_KEY);
+  // Try to split answers by number or line
+  let answers = text.split(/\n\d+\.\s*/).filter(a => a.trim());
+  if (answers.length < questions.length) {
+    // fallback: split by line
+    answers = text.split(/\n/).filter(a => a.trim());
+  }
+  // Only return as many as questions
+  return answers.slice(0, questions.length);
 };
