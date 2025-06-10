@@ -118,6 +118,12 @@ export const submitInterview = async (req, res) => {
     if (!interview) {
       return res.status(404).json({ message: 'Interview not found' });
     }
+    if (!Array.isArray(interview.questions)) {
+      return res.status(500).json({ message: 'Interview questions are missing or invalid.' });
+    }
+    if (!Array.isArray(answers)) {
+      return res.status(400).json({ message: 'Answers must be an array.' });
+    }
     interview.answers = answers;
     // Score calculation: percentage of non-empty, sufficiently detailed answers
     const total = interview.questions.length;
