@@ -453,10 +453,10 @@ app.post('/api/clerk/webhook', async (req, res) => {
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 // Remove app.listen for Vercel compatibility
-// const PORT = process.env.BACKEND_PORT || process.env.PORT || 5001;
-// app.listen(PORT, () => {
-//   console.log(`Server running on port ${PORT}`);
-// });
+const PORT = process.env.BACKEND_PORT || process.env.PORT || 5001;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
 
 // Export the app for Vercel serverless deployment
 export default app;

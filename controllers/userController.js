@@ -1,4 +1,6 @@
 import User from '../models/User.js';
+import ScheduledMock from '../models/ScheduledMock.js';
+import mongoose from 'mongoose';
 
 export const getAllUsers = async (req, res) => {
   try {
@@ -43,6 +45,32 @@ export const adminEditUser = async (req, res) => {
     }
     if (!user) return res.status(404).json({ message: 'User not found' });
     res.json({ success: true, user });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// Delete user and all related data
+export const deleteUserAndData = async (req, res) => {
+  try {
+    const clerkUserId = req.params.clerkUserId;
+    if (!clerkUserId) return res.status(400).json({ message: 'Missing clerkUserId' });
+
+    // Delete user from User collection
+    const user = await User.findOneAndDelete({ clerkUserId });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Delete all InterviewSessions for this user
+    const InterviewSession = mongoose.model('InterviewSession');
+    await InterviewSession.deleteMany({ userId: clerkUserId });
+
+    // Delete all ScheduledMocks for this user
+    await ScheduledMock.deleteMany({ userId: clerkUserId });
+
+    // Optionally: Delete user from Clerk (do this from frontend or with Clerk secret key)
+    // ...
+
+    res.json({ success: true, message: 'User and all data deleted' });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
